@@ -1,0 +1,211 @@
+<script setup lang="ts">
+import {
+  mdiPlus,
+  mdiDownload,
+  mdiCheckAll,
+  mdiCheck,
+  mdiAlert,
+  mdiAccount,
+} from '@mdi/js'
+import type { EntitiesMessageThread } from '~~/shared/types/api'
+
+const threadsStore = useThreadsStore()
+const phonesStore = usePhonesStore()
+const appStore = useAppStore()
+const notificationsStore = useNotificationsStore()
+const { formatPhoneNumber, startsWithLetter } = useFilters()
+
+function threadDate(date: string): string {
+  return new Date(date).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function hasUnreadMessages(unreadCount: number): boolean {
+  return unreadCount > 0
+}
+
+function unreadBadge(
+  unreadCount: number,
+): false | { color: string; content: string; dot: false } {
+  if (unreadCount === 0) return false
+
+  return {
+    color: 'primary',
+    content: unreadCount > 99 ? '99+' : String(unreadCount),
+    dot: false,
+  }
+}
+
+function onInstallApp() {
+  notificationsStore.addNotification({
+    type: 'info',
+    message: 'Downloading the httpSMS Android App',
+  })
+}
+
+function threadContactName(thread: EntitiesMessageThread): string {
+  return thread.contact_details?.name?.trim() ?? ''
+}
+
+function threadContactTitle(thread: EntitiesMessageThread): string {
+  return threadContactName(thread) || formatPhoneNumber(thread.contact)
+}
+
+function threadAvatarInitial(thread: EntitiesMessageThread): string {
+  const contactName = threadContactName(thread)
+  if (contactName) return contactName.substring(0, 1)
+
+  return startsWithLetter(thread.contact) ? thread.contact.substring(0, 1) : ''
+}
+</script>
+
+<template>
+  <div>
+    <v-progress-linear
+      v-if="threadsStore.loadingThreads"
+      color="primary"
+      indeterminate
+    />
+    <div
+      v-if="!threadsStore.loadingThreads && threadsStore.archivedThreads"
+      class="bg-warning py-1 text-center text-uppercase text-title-medium"
+    >
+      Archived Messages
+    </div>
+    <div
+      v-if="
+        !threadsStore.loadingThreads &&
+        threadsStore.threads.length === 0 &&
+        !threadsStore.archivedThreads
+      "
+      class="text-center mt-6"
+    >
+      <p v-if="phonesStore.owner" class="text-medium-emphasis text-center">
+        Start sending messages
+      </p>
+      <v-btn
+        v-if="phonesStore.owner && phonesStore.phones.length !== 0"
+        color="primary"
+        :to="{ name: 'messages' }"
+      >
+        <v-icon :icon="mdiPlus" start />
+        New Message
+      </v-btn>
+    </div>
+    <div
+      v-if="phonesStore.phones.length === 0 && !threadsStore.loadingThreads"
+      class="px-4 text-center"
+    >
+      <p>
+        Install the mobile app on your Android phone to start sending messages.
+        You can also
+        <a
+          href="https://discord.gg/kGk8HVqeEZ"
+          target="_blank"
+          class="text-decoration-none hover:text-decoration-underline"
+          >message us on Discord</a
+        >
+        to help set things up.
+      </p>
+      <v-btn
+        color="primary"
+        :href="appStore.appData.appDownloadUrl"
+        @click="onInstallApp"
+      >
+        <v-icon :icon="mdiDownload" start />
+        Download App
+      </v-btn>
+    </div>
+    <v-list
+      v-if="!threadsStore.loadingThreads && threadsStore.threads.length > 0"
+      class="py-0"
+      lines="three"
+    >
+      <v-list-item
+        v-for="thread in threadsStore.threads"
+        :key="thread.id"
+        color="primary"
+        :to="{ name: 'threads-id', params: { id: thread.id } }"
+        :active="threadsStore.threadId === thread.id"
+      >
+        <template #prepend>
+          <v-avatar
+            :color="thread.color"
+            size="40"
+            :badge="unreadBadge(thread.unread_count)"
+          >
+            <v-icon v-if="!threadAvatarInitial(thread)" color="white">{{
+              mdiAccount
+            }}</v-icon>
+            <span v-else class="text-white text-headline-small">{{
+              threadAvatarInitial(thread)
+            }}</span>
+          </v-avatar>
+        </template>
+        <v-list-item-title
+          :class="{
+            'font-weight-bold': hasUnreadMessages(thread.unread_count),
+          }"
+        >
+          {{ threadContactTitle(thread) }}
+        </v-list-item-title>
+        <v-list-item-subtitle
+          class="text-truncate mt-1"
+          :class="{
+            'font-weight-bold opacity-100': hasUnreadMessages(
+              thread.unread_count,
+            ),
+          }"
+          style="max-width: 250px"
+        >
+          {{ thread.last_message_content }}
+        </v-list-item-subtitle>
+        <template #append>
+          <div class="d-flex flex-column align-end">
+            <span class="text-body-small text-medium-emphasis">
+              {{ threadDate(thread.order_timestamp) }}
+            </span>
+            <VTooltip location="bottom">
+              <template #activator="{ props }">
+                <div v-bind="props" class="mt-1">
+                  <v-icon
+                    v-if="thread.status === 'expired'"
+                    color="warning"
+                    size="x-small"
+                    :icon="mdiAlert"
+                  />
+                  <v-icon
+                    v-else-if="thread.status === 'delivered'"
+                    color="primary"
+                    size="x-small"
+                    :icon="mdiCheckAll"
+                  />
+                  <v-icon
+                    v-else-if="thread.status === 'received'"
+                    color="success"
+                    size="x-small"
+                    :icon="mdiCheckAll"
+                  />
+                  <v-icon
+                    v-else-if="thread.status === 'sent'"
+                    size="x-small"
+                    :icon="mdiCheck"
+                  />
+                  <v-icon
+                    v-else-if="thread.status === 'failed'"
+                    color="error"
+                    size="x-small"
+                    :icon="mdiAlert"
+                  />
+                </div>
+              </template>
+              <span>{{ thread.status }}</span>
+            </VTooltip>
+          </div>
+        </template>
+      </v-list-item>
+    </v-list>
+  </div>
+</template>

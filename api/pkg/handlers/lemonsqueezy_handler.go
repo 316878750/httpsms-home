@@ -1,0 +1,100 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/NdoleStudio/httpsms/pkg/services"
+	"github.com/NdoleStudio/httpsms/pkg/telemetry"
+	"github.com/NdoleStudio/httpsms/pkg/validators"
+	lemonsqueezy "github.com/NdoleStudio/lemonsqueezy-go"
+	"github.com/NdoleStudio/stacktrace"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/gofiber/fiber/v3"
+)
+
+// LemonsqueezyHandler handles lemonsqueezy events
+type LemonsqueezyHandler struct {
+	handler
+	logger    telemetry.Logger
+	tracer    telemetry.Tracer
+	service   *services.LemonsqueezyService
+	validator *validators.LemonsqueezyHandlerValidator
+}
+
+// NewLemonsqueezyHandler creates a new LemonsqueezyHandler
+func NewLemonsqueezyHandler(
+	logger telemetry.Logger,
+	tracer telemetry.Tracer,
+	service *services.LemonsqueezyService,
+	validator *validators.LemonsqueezyHandlerValidator,
+) (h *LemonsqueezyHandler) {
+	return &LemonsqueezyHandler{
+		logger:    logger.WithService(fmt.Sprintf("%T", h)),
+		tracer:    tracer,
+		service:   service,
+		validator: validator,
+	}
+}
+
+// RegisterRoutes registers the routes for the MessageHandler
+func (h *LemonsqueezyHandler) RegisterRoutes(app *fiber.App, middlewares ...fiber.Handler) {
+	router := app.Group("lemonsqueezy")
+	h.register(router, fiber.MethodPost, "/event", middlewares, h.Event)
+}
+
+// Event handles lemonsqueezy events
+func (h *LemonsqueezyHandler) Event(c fiber.Ctx) error {
+	ctx, span, ctxLogger := h.tracer.StartFromFiberCtxWithLogger(c, h.logger)
+	defer span.End()
+
+	signature := c.Get("X-Signature")
+	if errors := h.validator.ValidateEvent(ctx, signature, c.Body()); len(errors) != 0 {
+		ctxLogger.Warn(stacktrace.NewErrorf("validation errors [%s], while storing request [%s] and signature [%s]", spew.Sdump(errors), c.Body(), signature))
+		return h.responseUnprocessableEntity(c, errors, "validation errors while storing lemonsqueezy event")
+	}
+
+	if err := h.handleRequest(ctx, c); err != nil {
+		ctxLogger.Error(stacktrace.Propagatef(err, "cannot handle lemonsqueezy event [%s]", c.Body()))
+		return h.responseInternalServerError(c)
+	}
+
+	return h.responseNoContent(c, "event consumed successfully")
+}
+
+func (h *LemonsqueezyHandler) handleRequest(ctx context.Context, c fiber.Ctx) error {
+	eventName := c.Get("X-Event-Name")
+	switch eventName {
+	case "subscription_created":
+		var request lemonsqueezy.WebhookRequestSubscription
+		err := json.Unmarshal(c.Body(), &request)
+		if err != nil {
+			return stacktrace.Propagatef(err, "cannot marshall [%s] to [%T]", c.Body(), request)
+		}
+		return h.service.HandleSubscriptionCreatedEvent(ctx, c.OriginalURL(), &request)
+	case "subscription_cancelled":
+		var request lemonsqueezy.WebhookRequestSubscription
+		err := json.Unmarshal(c.Body(), &request)
+		if err != nil {
+			return stacktrace.Propagatef(err, "cannot marshall [%s] to [%T]", c.Body(), request)
+		}
+		return h.service.HandleSubscriptionCanceledEvent(ctx, c.OriginalURL(), &request)
+	case "subscription_expired":
+		var request lemonsqueezy.WebhookRequestSubscription
+		err := json.Unmarshal(c.Body(), &request)
+		if err != nil {
+			return stacktrace.Propagatef(err, "cannot marshall [%s] to [%T]", c.Body(), request)
+		}
+		return h.service.HandleSubscriptionExpiredEvent(ctx, c.OriginalURL(), &request)
+	case "subscription_updated":
+		var request lemonsqueezy.WebhookRequestSubscription
+		err := json.Unmarshal(c.Body(), &request)
+		if err != nil {
+			return stacktrace.Propagatef(err, "cannot marshall [%s] to [%T]", c.Body(), request)
+		}
+		return h.service.HandleSubscriptionUpdatedEvent(ctx, c.OriginalURL(), &request)
+	default:
+		return stacktrace.NewErrorf("invalid event [%s] received with request [%s]", eventName, c.Body())
+	}
+}

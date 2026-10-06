@@ -1,0 +1,272 @@
+package repositories
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"time"
+
+	"gorm.io/gorm/clause"
+
+	"github.com/cockroachdb/cockroach-go/v2/crdb/crdbgorm"
+	"github.com/dgraph-io/ristretto/v2"
+
+	"github.com/NdoleStudio/httpsms/pkg/entities"
+	"github.com/NdoleStudio/httpsms/pkg/telemetry"
+	"github.com/NdoleStudio/stacktrace"
+	"gorm.io/gorm"
+)
+
+// gormUserRepository is responsible for persisting entities.User
+type gormUserRepository struct {
+	logger telemetry.Logger
+	tracer telemetry.Tracer
+	cache  *ristretto.Cache[string, entities.AuthContext]
+	db     *gorm.DB
+}
+
+// NewGormUserRepository creates the GORM version of the UserRepository
+func NewGormUserRepository(
+	logger telemetry.Logger,
+	tracer telemetry.Tracer,
+	cache *ristretto.Cache[string, entities.AuthContext],
+	db *gorm.DB,
+) UserRepository {
+	return &gormUserRepository{
+		logger: logger.WithService(fmt.Sprintf("%T", &gormUserRepository{})),
+		tracer: tracer,
+		cache:  cache,
+		db:     db,
+	}
+}
+
+// Delete deletes a user
+func (repository *gormUserRepository) Delete(ctx context.Context, user *entities.User) error {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	if err := repository.db.WithContext(ctx).Delete(user).Error; err != nil {
+		return repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot delete user with ID [%s]", user.ID))
+	}
+
+	return nil
+}
+
+func (repository *gormUserRepository) RotateAPIKey(ctx context.Context, userID entities.UserID) (*entities.User, error) {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	apiKey, err := repository.generateAPIKey(64)
+	if err != nil {
+		return nil, stacktrace.Propagatef(err, "cannot generate apiKey for user [%s]", userID)
+	}
+
+	user := new(entities.User)
+	var oldAPIKey string
+	err = crdbgorm.ExecuteTx(
+		ctx, repository.db, nil,
+		func(tx *gorm.DB) error {
+			if err := tx.WithContext(ctx).Where("id = ?", userID).First(user).Error; err != nil {
+				return err
+			}
+			oldAPIKey = user.APIKey
+			return tx.WithContext(ctx).Model(user).
+				Clauses(clause.Returning{}).
+				Where("id = ?", userID).
+				Update("api_key", "uk_"+apiKey).Error
+		},
+	)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.PropagateWithCodef(err, ErrCodeNotFound, "user with ID [%s] does not exist", userID))
+	}
+
+	if err == nil && oldAPIKey != "" {
+		// Flush pending ristretto Set operations before Del to avoid a
+		// buffered Set re-adding the entry after removal.
+		repository.cache.Wait()
+		repository.cache.Del(oldAPIKey)
+	}
+
+	return user, nil
+}
+
+func (repository *gormUserRepository) LoadBySubscriptionID(ctx context.Context, subscriptionID string) (*entities.User, error) {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	user := new(entities.User)
+	err := repository.db.WithContext(ctx).
+		Where("subscription_id = ?", subscriptionID).
+		First(user).
+		Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.PropagateWithCodef(err, ErrCodeNotFound, "user with subscriptionID [%s] does not exist", subscriptionID))
+	}
+
+	if err != nil {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot load user with subscription ID [%s]", subscriptionID))
+	}
+
+	return user, nil
+}
+
+func (repository *gormUserRepository) LoadByEmail(ctx context.Context, email string) (*entities.User, error) {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	user := new(entities.User)
+	err := repository.db.WithContext(ctx).
+		Where("email = ?", email).
+		First(user).
+		Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.PropagateWithCodef(err, ErrCodeNotFound, "user with email [%s] does not exist", email))
+	}
+
+	if err != nil {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot load user with email ID [%s]", email))
+	}
+
+	return user, nil
+}
+
+func (repository *gormUserRepository) Store(ctx context.Context, user *entities.User) error {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	if err := repository.db.WithContext(ctx).Create(user).Error; err != nil {
+		return repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot save user with ID [%s]", user.ID))
+	}
+
+	return nil
+}
+
+func (repository *gormUserRepository) Update(ctx context.Context, user *entities.User) error {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	if err := repository.db.WithContext(ctx).Save(user).Error; err != nil {
+		return repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot update user with ID [%s]", user.ID))
+	}
+
+	return nil
+}
+
+func (repository *gormUserRepository) LoadAuthContext(ctx context.Context, apiKey string) (entities.AuthContext, error) {
+	ctx, span, ctxLogger := repository.tracer.StartWithLogger(ctx, repository.logger)
+	defer span.End()
+
+	if authUser, found := repository.cache.Get(apiKey); found {
+		if authUser.IsNoop() {
+			return authUser, repository.tracer.WrapErrorSpan(span, stacktrace.NewErrorf("user with api key [%s] does not exist", apiKey))
+		}
+		return authUser, nil
+	}
+
+	user := new(entities.User)
+	err := repository.db.WithContext(ctx).Where("api_key = ?", apiKey).First(user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		repository.cache.SetWithTTL(apiKey, entities.AuthContext{}, 1, 2*time.Hour)
+
+		return entities.AuthContext{}, repository.tracer.WrapErrorSpan(span, stacktrace.PropagateWithCodef(err, ErrCodeNotFound, "user with api key [%s] does not exist", apiKey))
+	}
+
+	if err != nil {
+		return entities.AuthContext{}, repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot load user with api key [%s]", apiKey))
+	}
+
+	authUser := entities.AuthContext{
+		ID:    user.ID,
+		Email: user.Email,
+	}
+
+	if result := repository.cache.SetWithTTL(apiKey, authUser, 1, 2*time.Hour); !result {
+		ctxLogger.Error(repository.tracer.WrapErrorSpan(span, stacktrace.NewErrorf("cannot cache [%T] with ID [%s] and result [%t]", authUser, user.ID, result)))
+	}
+
+	return authUser, nil
+}
+
+func (repository *gormUserRepository) Load(ctx context.Context, userID entities.UserID) (*entities.User, error) {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	user := new(entities.User)
+	err := repository.db.WithContext(ctx).First(user, userID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.PropagateWithCodef(err, ErrCodeNotFound, "user with ID [%s] does not exist", userID))
+	}
+
+	if err != nil {
+		return nil, repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot load user with ID [%s]", userID))
+	}
+
+	return user, nil
+}
+
+func (repository *gormUserRepository) LoadOrStore(ctx context.Context, authUser entities.AuthContext) (*entities.User, bool, error) {
+	ctx, span := repository.tracer.Start(ctx)
+	defer span.End()
+
+	user, err := repository.Load(ctx, authUser.ID)
+	if err == nil {
+		return user, false, nil
+	}
+
+	apiKey, err := repository.generateAPIKey(64)
+	if err != nil {
+		return nil, false, stacktrace.Propagatef(err, "cannot generate apiKey for user [%s]", authUser.ID)
+	}
+
+	user = &entities.User{
+		ID:               authUser.ID,
+		Email:            authUser.Email,
+		APIKey:           "uk_" + apiKey,
+		SubscriptionName: entities.SubscriptionNameFree,
+		CreatedAt:        time.Now().UTC(),
+		UpdatedAt:        time.Now().UTC(),
+	}
+
+	isNew := false
+	err = crdbgorm.ExecuteTx(ctx, repository.db, nil, func(tx *gorm.DB) error {
+		result := tx.WithContext(ctx).Where(entities.User{ID: user.ID}).FirstOrCreate(user)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			isNew = true
+		}
+		return result.Error
+	})
+	if err != nil {
+		return user, isNew, repository.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot create user from auth user [%+#v]", authUser))
+	}
+
+	return user, isNew, nil
+}
+
+// generateRandomBytes returns securely generated random bytes.
+// It will return an error if the system's secure random
+// number generator fails to function correctly, in which
+// case the caller should not continue.
+func (repository *gormUserRepository) generateRandomBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	// Note that err == nil only if we read len(b) bytes.
+	if _, err := rand.Read(b); err != nil {
+		return nil, stacktrace.Propagatef(err, "cannot generate [%d] random bytes", n)
+	}
+
+	return b, nil
+}
+
+// generateAPIKey returns a URL-safe, base64 encoded
+// securely generated random string.
+// It will return an error if the system's secure random
+// number generator fails to function correctly, in which
+// case the caller should not continue.
+func (repository *gormUserRepository) generateAPIKey(n int) (string, error) {
+	b, err := repository.generateRandomBytes(n)
+	return base64.URLEncoding.EncodeToString(b)[0:n], stacktrace.Propagatef(err, "cannot generate random bytes")
+}

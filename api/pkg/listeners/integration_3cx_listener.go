@@ -1,0 +1,124 @@
+package listeners
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/NdoleStudio/httpsms/pkg/events"
+	"github.com/NdoleStudio/httpsms/pkg/services"
+	"github.com/NdoleStudio/httpsms/pkg/telemetry"
+	"github.com/NdoleStudio/stacktrace"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+)
+
+// Integration3CXListener sends 3CX events to users
+type Integration3CXListener struct {
+	logger  telemetry.Logger
+	tracer  telemetry.Tracer
+	service *services.Integration3CXService
+}
+
+// NewIntegration3CXListener creates a new instance of Integration3CXListener
+func NewIntegration3CXListener(
+	logger telemetry.Logger,
+	tracer telemetry.Tracer,
+	service *services.Integration3CXService,
+) (l *Integration3CXListener, routes map[string]events.EventListener) {
+	l = &Integration3CXListener{
+		logger:  logger.WithService(fmt.Sprintf("%T", l)),
+		tracer:  tracer,
+		service: service,
+	}
+
+	return l, map[string]events.EventListener{
+		// events.EventTypeMessagePhoneReceived:  l.OnMessagePhoneReceived,
+		// events.EventTypeMessagePhoneDelivered: l.OnMessagePhoneDelivered,
+		// events.EventTypeMessageSendFailed:     l.OnMessageSendFailed,
+		// events.EventTypeMessagePhoneSent:      l.OnMessagePhoneSent,
+		events.UserAccountDeleted: l.onUserAccountDeleted,
+	}
+}
+
+// OnMessagePhoneReceived handles the events.EventTypeMessagePhoneReceived event
+func (listener *Integration3CXListener) OnMessagePhoneReceived(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := listener.tracer.Start(ctx)
+	defer span.End()
+
+	var payload events.MessagePhoneReceivedPayload
+	if err := event.DataAs(&payload); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot decode [%s] into [%T]", event.Data(), payload))
+	}
+
+	if err := listener.service.Send(ctx, payload.UserID, event); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot process [%s] event with ID [%s]", event.Type(), event.ID()))
+	}
+
+	return nil
+}
+
+// OnMessageSendFailed handles the events.EventTypeMessageSendFailed event
+func (listener *Integration3CXListener) OnMessageSendFailed(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := listener.tracer.Start(ctx)
+	defer span.End()
+
+	var payload events.MessageSendFailedPayload
+	if err := event.DataAs(&payload); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot decode [%s] into [%T]", event.Data(), payload))
+	}
+
+	if err := listener.service.Send(ctx, payload.UserID, event); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot process [%s] event with ID [%s]", event.Type(), event.ID()))
+	}
+
+	return nil
+}
+
+// OnMessagePhoneSent handles the events.EventTypeMessagePhoneSent event
+func (listener *Integration3CXListener) OnMessagePhoneSent(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := listener.tracer.Start(ctx)
+	defer span.End()
+
+	var payload events.MessagePhoneSentPayload
+	if err := event.DataAs(&payload); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot decode [%s] into [%T]", event.Data(), payload))
+	}
+
+	if err := listener.service.Send(ctx, payload.UserID, event); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot process [%s] event with ID [%s]", event.Type(), event.ID()))
+	}
+
+	return nil
+}
+
+// OnMessagePhoneDelivered handles the events.EventTypeMessagePhoneDelivered event
+func (listener *Integration3CXListener) OnMessagePhoneDelivered(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := listener.tracer.Start(ctx)
+	defer span.End()
+
+	var payload events.MessagePhoneDeliveredPayload
+	if err := event.DataAs(&payload); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot decode [%s] into [%T]", event.Data(), payload))
+	}
+
+	if err := listener.service.Send(ctx, payload.UserID, event); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot process [%s] event with ID [%s]", event.Type(), event.ID()))
+	}
+
+	return nil
+}
+
+func (listener *Integration3CXListener) onUserAccountDeleted(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := listener.tracer.Start(ctx)
+	defer span.End()
+
+	var payload events.UserAccountDeletedPayload
+	if err := event.DataAs(&payload); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot decode [%s] into [%T]", event.Data(), payload))
+	}
+
+	if err := listener.service.DeleteAllForUser(ctx, payload.UserID); err != nil {
+		return listener.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot delete [entities.Integration3CX] for user [%s] on [%s] event with ID [%s]", payload.UserID, event.Type(), event.ID()))
+	}
+
+	return nil
+}

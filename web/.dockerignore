@@ -1,0 +1,7 @@
+.env*
+node_modules
+.nuxt
+.output
+.git
+*credentials*.json
+*serviceAccount*.json

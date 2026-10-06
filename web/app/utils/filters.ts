@@ -1,0 +1,125 @@
+import {
+  intervalToDuration,
+  formatDuration,
+  differenceInSeconds,
+  differenceInMinutes,
+  differenceInDays,
+  differenceInHours,
+} from 'date-fns'
+import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js'
+
+export function formatPhoneNumber(value: string): string {
+  if (!value || typeof value !== 'string') {
+    return value ?? ''
+  }
+  if (!isValidPhoneNumber(value)) {
+    return value
+  }
+  const phoneNumber = parsePhoneNumber(value)
+  if (phoneNumber) {
+    return phoneNumber.formatInternational()
+  }
+  return value
+}
+
+export function phoneCountry(value: string): string {
+  const phoneNumber = parsePhoneNumber(value)
+  if (phoneNumber && phoneNumber.country) {
+    const regionNames = new Intl.DisplayNames(undefined, { type: 'region' })
+    return regionNames.of(phoneNumber.country) ?? 'Earth'
+  }
+  return 'Earth'
+}
+
+export function formatTimestamp(value: string): string {
+  return new Date(value).toLocaleString()
+}
+
+export function formatMoney(value: string | number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  }).format(typeof value === 'string' ? parseInt(value) : value)
+}
+
+export function formatDecimal(value: string | number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'decimal',
+  }).format(typeof value === 'string' ? parseInt(value) : value)
+}
+
+export function formatBillingPeriod(value: string): string {
+  return new Date(value).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'long',
+  })
+}
+
+export function formatBillingPeriodDateOrdinal(value: string): string {
+  const date = new Date(value)
+  const day = date.getDate()
+  const month = date.toLocaleDateString('en-US', { month: 'long' })
+  const year = date.getFullYear()
+
+  const suffix =
+    day % 10 === 1 && day !== 11
+      ? 'st'
+      : day % 10 === 2 && day !== 12
+        ? 'nd'
+        : day % 10 === 3 && day !== 13
+          ? 'rd'
+          : 'th'
+
+  return `${month} ${day}<sup>${suffix}</sup> ${year}`
+}
+
+export interface BillingPeriodDateOrdinalParts {
+  leading: string
+  suffix: string
+  trailing: string
+}
+
+export function formatBillingPeriodDateOrdinalParts(
+  value: string,
+): BillingPeriodDateOrdinalParts {
+  const date = new Date(value)
+  const day = date.getDate()
+  const month = date.toLocaleDateString('en-US', { month: 'long' })
+  const year = date.getFullYear()
+
+  const suffix =
+    day % 10 === 1 && day !== 11
+      ? 'st'
+      : day % 10 === 2 && day !== 12
+        ? 'nd'
+        : day % 10 === 3 && day !== 13
+          ? 'rd'
+          : 'th'
+
+  return { leading: `${month} ${day}`, suffix, trailing: ` ${year}` }
+}
+
+export function humanizeTime(value: string): string {
+  const durations = intervalToDuration({
+    start: new Date(value),
+    end: new Date(),
+  })
+  return formatDuration(durations)
+}
+
+export function startsWithLetter(value: string): boolean {
+  return /^[a-zA-Z]/.test(value)
+}
+
+export function humanizeTimeShort(date: string) {
+  const now = new Date()
+  const seconds = differenceInSeconds(now, new Date(date))
+  const minutes = differenceInMinutes(now, new Date(date))
+  const hours = differenceInHours(now, new Date(date))
+  const days = differenceInDays(now, new Date(date))
+
+  if (seconds < 60) return 'just now'
+  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
+  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
+  return `${days} day${days !== 1 ? 's' : ''} ago`
+}

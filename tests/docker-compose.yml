@@ -1,0 +1,142 @@
+services:
+  cockroachdb:
+    image: cockroachdb/cockroach:latest
+    command: start-single-node --insecure --store=type=mem,size=640MiB
+    ports:
+      - "26257:26257"
+      - "8081:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "cockroach",
+          "sql",
+          "--insecure",
+          "--host=localhost",
+          "--execute=SELECT 1;",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  cockroachdb-init:
+    image: cockroachdb/cockroach:latest
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    entrypoint:
+      [
+        "cockroach",
+        "sql",
+        "--insecure",
+        "--host=cockroachdb",
+        "--execute=CREATE DATABASE IF NOT EXISTS httpsms;",
+      ]
+    restart: "no"
+
+  redis:
+    image: redis:latest
+    command: redis-server
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: httpsms
+      MONGO_INITDB_ROOT_PASSWORD: testpassword
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  wiremock:
+    image: wiremock/wiremock:3x
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./wiremock/mappings:/home/wiremock/mappings:ro
+    networks:
+      default:
+        aliases:
+          - wiremock.local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  adapter-emulator:
+    build:
+      context: ./adapter-emulator
+    ports:
+      - "9092:9092"
+    environment:
+      API_BASE_URL: http://api:8000
+      ADAPTER_TLS_CERT: /certs/server.pem
+      ADAPTER_TLS_KEY: /certs/server-key.pem
+    volumes:
+      - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9092/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../api
+    ports:
+      - "8000:8000"
+    depends_on:
+      cockroachdb-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      wiremock:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      adapter-emulator:
+        condition: service_healthy
+    env_file:
+      - .env.test
+    environment:
+      FIREBASE_CREDENTIALS: "${FIREBASE_CREDENTIALS}"
+      SSL_CERT_FILE: /adapter-certs/ca.pem
+    volumes:
+      - ./certs/ca.pem:/adapter-certs/ca.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  seed:
+    image: cockroachdb/cockroach:latest
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./seed.sql:/seed.sql:ro
+    entrypoint:
+      [
+        "cockroach",
+        "sql",
+        "--insecure",
+        "--host=cockroachdb",
+        "--database=httpsms",
+        "--file=/seed.sql",
+      ]
+    restart: "no"

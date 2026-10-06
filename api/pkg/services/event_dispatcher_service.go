@@ -1,0 +1,183 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/NdoleStudio/httpsms/pkg/events"
+	"github.com/NdoleStudio/httpsms/pkg/telemetry"
+	"github.com/NdoleStudio/stacktrace"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+)
+
+// EventDispatcher dispatches a new event
+type EventDispatcher struct {
+	logger      telemetry.Logger
+	tracer      telemetry.Tracer
+	listeners   map[string][]events.EventListener
+	meter       metric.Float64Histogram
+	queue       PushQueue
+	queueConfig PushQueueConfig
+}
+
+// NewEventDispatcher creates a new EventDispatcher
+func NewEventDispatcher(
+	logger telemetry.Logger,
+	tracer telemetry.Tracer,
+	meter metric.Float64Histogram,
+	queue PushQueue,
+	queueConfig PushQueueConfig,
+) (dispatcher *EventDispatcher) {
+	return &EventDispatcher{
+		logger:      logger,
+		tracer:      tracer,
+		meter:       meter,
+		listeners:   make(map[string][]events.EventListener),
+		queue:       queue,
+		queueConfig: queueConfig,
+	}
+}
+
+// DispatchSync dispatches a new event
+func (dispatcher *EventDispatcher) DispatchSync(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := dispatcher.tracer.Start(ctx)
+	defer span.End()
+
+	if err := event.Validate(); err != nil {
+		return dispatcher.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot dispatch event with ID [%s] and type [%s] because it is invalid", event.ID(), event.Type()))
+	}
+
+	return dispatcher.Publish(ctx, event)
+}
+
+// DispatchWithTimeout dispatches an event with a timeout
+func (dispatcher *EventDispatcher) DispatchWithTimeout(ctx context.Context, event cloudevents.Event, timeout time.Duration) (queueID string, err error) {
+	ctx, span := dispatcher.tracer.Start(ctx)
+	defer span.End()
+
+	if err = event.Validate(); err != nil {
+		return queueID, dispatcher.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot dispatch event with ID [%s] and type [%s] because it is invalid", event.ID(), event.Type()))
+	}
+
+	task, err := dispatcher.createCloudTask(event)
+	if err != nil {
+		return queueID, dispatcher.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot create cloud task for event [%s] with id [%s]", event.Type(), event.ID()))
+	}
+
+	if queueID, err = dispatcher.enqueue(ctx, event, task, timeout); err != nil {
+		return queueID, dispatcher.tracer.WrapErrorSpan(span, stacktrace.Propagatef(err, "cannot enqueue event with ID [%s] and type [%s]", event.ID(), event.Type()))
+	}
+
+	return queueID, nil
+}
+
+func (dispatcher *EventDispatcher) enqueue(ctx context.Context, event cloudevents.Event, task *PushQueueTask, timeout time.Duration) (string, error) {
+	ctx, span, ctxLogger := dispatcher.tracer.StartWithLogger(ctx, dispatcher.logger)
+	defer span.End()
+
+	queueID, err := dispatcher.queue.Enqueue(ctx, task, timeout)
+	_, durable := dispatcher.queue.(*PostgresPushQueue)
+	if errors.Is(err, context.DeadlineExceeded) && !durable {
+		ctxLogger.Warn(stacktrace.Propagatef(err, "cannot enqueue event with ID [%s] and type [%s] to [%T]", event.ID(), event.Type(), dispatcher.queue))
+		queueID, err = fmt.Sprintf("local-%s", event.ID()), nil
+		time.AfterFunc(timeout, func() {
+			dispatcher.Publish(ctx, event)
+		})
+	}
+	return queueID, err
+}
+
+// Dispatch a new event by adding it to the queue to be processed async
+func (dispatcher *EventDispatcher) Dispatch(ctx context.Context, event cloudevents.Event) error {
+	ctx, span := dispatcher.tracer.Start(ctx)
+	defer span.End()
+	_, err := dispatcher.DispatchWithTimeout(ctx, event, time.Nanosecond*1)
+	return err
+}
+
+// Subscribe a listener to an event
+func (dispatcher *EventDispatcher) Subscribe(eventType string, listener events.EventListener) {
+	if _, ok := dispatcher.listeners[eventType]; !ok {
+		dispatcher.listeners[eventType] = []events.EventListener{}
+	}
+
+	dispatcher.listeners[eventType] = append(dispatcher.listeners[eventType], listener)
+}
+
+// Publish an event to subscribers
+func (dispatcher *EventDispatcher) Publish(ctx context.Context, event cloudevents.Event) error {
+	ctx, span, ctxLogger := dispatcher.tracer.StartWithLogger(ctx, dispatcher.logger)
+	defer span.End()
+
+	dispatcher.addCloudEventAttributes(span, event)
+
+	start := time.Now()
+
+	subscribers, ok := dispatcher.listeners[event.Type()]
+	if !ok {
+		ctxLogger.Info(fmt.Sprintf("no listener is configured for event type [%s] with id [%s]", event.Type(), event.ID()))
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	var errorMu sync.Mutex
+	var listenerErrors []error
+	for _, sub := range subscribers {
+		wg.Add(1)
+		go func(ctx context.Context, sub events.EventListener) {
+			if err := sub(ctx, event); err != nil {
+				ctxLogger.Error(stacktrace.Propagatef(err, "subscriber [%T] cannot handle event [%s]", sub, event.Type()))
+				errorMu.Lock()
+				listenerErrors = append(listenerErrors, err)
+				errorMu.Unlock()
+			}
+			wg.Done()
+		}(ctx, sub)
+	}
+
+	wg.Wait()
+
+	dispatcher.meter.Record(
+		ctx,
+		float64(time.Since(start).Milliseconds()),
+		metric.WithAttributes(
+			semconv.CloudeventsEventType(event.Type()),
+			semconv.CloudeventsEventSpecVersion(event.SpecVersion()),
+		),
+	)
+	return errors.Join(listenerErrors...)
+}
+
+func (dispatcher *EventDispatcher) addCloudEventAttributes(span trace.Span, event cloudevents.Event) {
+	span.SetAttributes(
+		semconv.CloudeventsEventType(event.Type()),
+		semconv.CloudeventsEventID(event.ID()),
+		semconv.CloudeventsEventSource(event.Source()),
+		semconv.CloudeventsEventSpecVersion(event.SpecVersion()),
+	)
+}
+
+func (dispatcher *EventDispatcher) createCloudTask(event cloudevents.Event) (*PushQueueTask, error) {
+	eventContent, err := json.Marshal(event)
+	if err != nil {
+		return nil, stacktrace.Propagatef(err, "cannot marshall [%T] with ID [%s]", event, event.ID())
+	}
+
+	return &PushQueueTask{
+		Method: http.MethodPost,
+		URL:    dispatcher.queueConfig.ConsumerEndpoint,
+		Body:   eventContent,
+		Headers: map[string]string{
+			"x-api-key": dispatcher.queueConfig.UserAPIKey,
+		},
+	}, nil
+}

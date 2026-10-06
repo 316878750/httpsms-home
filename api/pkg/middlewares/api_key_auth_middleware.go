@@ -1,0 +1,61 @@
+package middlewares
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/NdoleStudio/httpsms/pkg/repositories"
+	"github.com/NdoleStudio/httpsms/pkg/telemetry"
+	"github.com/NdoleStudio/stacktrace"
+	"github.com/gofiber/fiber/v3"
+)
+
+// APIKeyAuth authenticates a user from the X-API-Key header
+func APIKeyAuth(logger telemetry.Logger, tracer telemetry.Tracer, userRepository repositories.UserRepository) fiber.Handler {
+	logger = logger.WithService("middlewares.APIKeyAuth")
+
+	return func(c fiber.Ctx) error {
+		ctx, span := tracer.StartFromFiberCtx(c, "middlewares.APIKeyAuth")
+		defer span.End()
+
+		ctxLogger := tracer.CtxLogger(logger, span)
+
+		apiKey := getAPIKeyFromRequest(c)
+		if len(apiKey) == 0 || apiKey == "undefined" || strings.HasPrefix(apiKey, "pk_") {
+			span.AddEvent(fmt.Sprintf("the request header has no primary [%s] header", authHeaderAPIKey))
+			return c.Next()
+		}
+
+		authUser, err := userRepository.LoadAuthContext(ctx, apiKey)
+		if err != nil {
+			ctxLogger.Error(stacktrace.Propagatef(err, "cannot load user with api key [%s]", apiKey))
+			return c.Next()
+		}
+
+		c.Locals(ContextKeyAuthUserID, authUser)
+		return c.Next()
+	}
+}
+
+func getAPIKeyFromRequest(c fiber.Ctx) string {
+	apiKey := c.Get(authHeaderAPIKey)
+	if len(apiKey) != 0 {
+		return apiKey
+	}
+
+	payload := struct {
+		APIKey string `json:"x-api-key" form:"x-api-key" query:"x-api-key"`
+	}{}
+
+	if c.HasBody() {
+		if err := c.Bind().Body(&payload); err == nil && payload.APIKey != "" {
+			return payload.APIKey
+		}
+	}
+
+	if err := c.Bind().Query(&payload); err != nil {
+		return ""
+	}
+
+	return payload.APIKey
+}

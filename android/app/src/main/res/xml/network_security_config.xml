@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+  <!-- Install only the home server's public CA on the dedicated phone.
+         User CAs are trusted solely for this fixed local hostname. -->
+  <domain-config cleartextTrafficPermitted="false">
+    <domain includeSubdomains="false">httpsms.home.arpa</domain>
+    <trust-anchors>
+      <certificates src="user" />
+    </trust-anchors>
+  </domain-config>
+</network-security-config>
