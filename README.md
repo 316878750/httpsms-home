@@ -4,7 +4,7 @@
 
 **首次部署请按 [完整复现教程](deploy/local/README.md) 操作。** 每位用户需要自己的 Firebase 配置、手机和签名密钥；仓库不分发预配置 APK、不提供虚拟号码。
 
-首个固定版本为 `v1.0.0-home`；验证范围见 [复现记录](docs/REPRODUCIBILITY.md)，原理与开发经验见 [开发教程](docs/architecture-and-development.md)。
+当前固定版本为 `v1.0.1-home`；验证范围见 [复现记录](docs/REPRODUCIBILITY.md)，原理与开发经验见 [开发教程](docs/architecture-and-development.md)。
 
 ## 本次修改
 
@@ -21,7 +21,7 @@
 当前脚本支持家庭 `/24` IPv4 子网。其他子网需要先调整并验证防火墙脚本。不要做路由器公网端口映射。
 
 ```powershell
-git clone --branch v1.0.0-home https://github.com/316878750/httpsms-home.git
+git clone --branch v1.0.1-home https://github.com/316878750/httpsms-home.git
 cd httpsms-home
 .\deploy\local\Prepare-Local.ps1 -LanIP 192.168.1.50 -LanCidr 192.168.1.0/24
 # 接着按完整教程配置工具和自己的 Firebase；上面地址只是示例。

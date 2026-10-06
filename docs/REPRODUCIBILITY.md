@@ -9,6 +9,7 @@
 | 独立源码文件清单 | 排除原 `.local`、Google 配置、env、密钥、APK、崩溃日志及原 CI 发布配置 |
 | 干净 Git 克隆 | 不携带 `.local` 或 `google-services.json`；重新生成配置、导入合成项目及保存新工具路径通过 |
 | Windows 脚本 | PowerShell 5.1 和 PowerShell 7 语法检查通过 |
+| Windows 防火墙识别 | 只读验证实际规则；同时兼容 `/24` 和 `/255.255.255.0`，未修改原收信防火墙 |
 | Firebase 配置导入 | 三端项目一致性、包名与 sender ID 检查通过；凭据不打印 |
 | Android | 上传策略单元测试通过；正式 release 构建通过 |
 | 全新 APK 签名 | 不使用旧 debug 密钥，V3 签名验证通过；未安装到真实手机 |

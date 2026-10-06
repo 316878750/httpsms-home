@@ -1,8 +1,8 @@
 [CmdletBinding()]
-param()
+param([switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Use-DDriveTools.ps1')
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run as administrator after Protect-DockerLanPort.ps1.' }
+if (-not $CheckOnly -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run as administrator after Protect-DockerLanPort.ps1.' }
 if (@(Get-NetFirewallProfile | Where-Object { -not $_.Enabled }).Count) { throw 'Windows firewall must remain enabled for all profiles.' }
 $configPath = Join-Path $repoRoot '.local/compose.env'
 $lines = @(Get-Content -LiteralPath $configPath)
@@ -17,7 +17,11 @@ foreach ($kind in $rules.Keys) {
     $ports = $rule | Get-NetFirewallPortFilter
     $addresses = $rule | Get-NetFirewallAddressFilter
     if ($rule.Enabled -ne 'True' -or $rule.Direction -ne 'Inbound' -or $rule.Action -ne $kind -or $rule.Profile -ne 'Any' -or $ports.LocalPort -ne '8444' -or $ports.Protocol -ne 'TCP' -or $addresses.LocalAddress -notcontains $lanIP) { throw 'Firewall rules do not match this deployment.' }
-    if ($kind -eq 'Allow' -and $addresses.RemoteAddress -notcontains $lanCidr) { throw 'Home allow rule has a different subnet.' }
+    if ($kind -eq 'Allow') {
+        # Windows returns /24 rules as /255.255.255.0 on some versions.
+        $equivalent = @($lanCidr, $lanCidr.Replace('/24','/255.255.255.0'))
+        if (-not @($addresses.RemoteAddress | Where-Object { $equivalent -contains $_ }).Count) { throw 'Home allow rule has a different subnet.' }
+    }
     if ($kind -eq 'Block') {
         if ($lanCidr -notmatch '^([0-9.]+)/24$') { throw 'This firewall workflow requires /24.' }
         $b = [Net.IPAddress]::Parse($Matches[1]).GetAddressBytes()
@@ -29,6 +33,7 @@ foreach ($kind in $rules.Keys) {
         foreach ($range in $expected) { if ($addresses.RemoteAddress -notcontains $range) { throw 'Outside-home block rule does not cover the expected ranges.' } }
     }
 }
+if ($CheckOnly) { Write-Host 'Home-only firewall rules match this deployment. No settings changed.'; return }
 $compose = @('compose','--project-directory',$repoRoot,'--env-file',$configPath,'-f',(Join-Path $repoRoot 'compose.local.yml'))
 $container = & docker @compose ps -q proxy
 if ($LASTEXITCODE -ne 0 -or -not $container) { throw 'Start the local proxy first.' }

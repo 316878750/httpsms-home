@@ -30,7 +30,7 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 ## 3. 克隆并生成配置
 
 ```powershell
-git clone --branch v1.0.0-home https://github.com/316878750/httpsms-home.git
+git clone --branch v1.0.1-home https://github.com/316878750/httpsms-home.git
 cd httpsms-home
 .\deploy\local\Prepare-Local.ps1 -LanIP 192.168.1.50 -LanCidr 192.168.1.0/24
 ```
@@ -99,6 +99,8 @@ Docker Desktop 常把手机源地址改写为 edge 网关。需支持这一行�
 ```
 
 脚本先验证防火墙规则与当前地址/子网匹配、各网络类别防火墙启用，再读取当前 Docker edge 网关并重建 proxy。不能手填 `0.0.0.0/0`。重建 Docker 网络后网关可能变化，需重新配置；403 时检查真实来源，不能直接全放行。
+
+需要只检查防火墙而不改配置时，运行 `Enable-DockerPeer.ps1 -CheckOnly`。v1.0.1-home 同时识别 Windows 返回的 `/24` 和 `/255.255.255.0` 表示。
 
 ## 6. 信任公开证书、注册网页账号
 
